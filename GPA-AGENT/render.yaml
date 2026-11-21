@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: pucit-gpa-mcp
+    runtime: python
+    buildCommand: pip install -r requirements-server.txt
+    startCommand: python server/server.py

@@ -1,9 +1,5 @@
-from langchain.chat_models import init_chat_model
-from dotenv import load_dotenv
-import os
-load_dotenv()
+"""Compatibility export for the LangGraph agent's chat model."""
 
-Groq_api_key=os.getenv("GROQ_API_KEY")
+from .agent import llm
 
-llm=init_chat_model("groq:openai/gpt-oss-120b",api_key=Groq_api_key)
-
+__all__ = ["llm"]

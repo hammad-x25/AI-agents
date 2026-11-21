@@ -1,2 +1,9 @@
+"""PUCIT GPA assistant package."""
+
+import asyncio
+
+
 def main() -> None:
-    print("Hello from ai-assignment01!")
+    from .agent import main as async_main
+
+    asyncio.run(async_main())
