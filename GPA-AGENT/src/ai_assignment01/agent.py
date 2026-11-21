@@ -7,8 +7,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 from fastmcp import Client
@@ -45,13 +44,17 @@ curriculum, credit hours, and saving useful reports.
 Never do arithmetic yourself. Every numeric result must come from a tool. Never
 guess marks, grade points, GPA, CGPA, credit hours, semester numbers, courses,
 or targets. Ask for only one or two missing items at a time. Use the curriculum
-tools as the authority; full official course names are required, and unclear
-abbreviations must be expanded by the student. MD-001 and MD-002 are non-credit
-pass/fail courses and never enter GPA/CGPA calculations. Quran Translation does
-count and has the credit hours in the curriculum.
+tools as the authority. Full official course names are required when a course's
+credit hours or curriculum membership is needed; a standalone question such as
+“I got 85 marks. What are my grade points?” needs only marks_to_grade_points.
+Unclear course abbreviations must be expanded by the student. MD-001 and MD-002
+are non-credit pass/fail courses and never enter GPA/CGPA calculations. Quran
+Translation does count and has the credit hours in the curriculum.
 
-For marks: convert every supplied mark, verify course membership/credit hours,
-then calculate the credit-weighted GPA. If only some courses were supplied,
+For a standalone marks-to-grade-points question, call marks_to_grade_points
+immediately. For a GPA question with courses: convert every supplied mark,
+verify course membership/credit hours, then calculate the credit-weighted GPA.
+If only some courses were supplied,
 call it “GPA for the provided courses”, not full semester GPA.
 
 For CGPA projection, obtain current CGPA, completed graded hours, semester GPA,
@@ -109,9 +112,17 @@ def _tool_result_text(value: Any) -> str:
     return str(value)
 
 
-async def _model_node(state: MessagesState, *, tools_available: bool) -> dict[str, list[Any]]:
+async def _model_node(
+    state: MessagesState,
+    *,
+    tools: list[Any],
+    tools_available: bool,
+) -> dict[str, list[Any]]:
     prompt = SYSTEM_PROMPT if tools_available else f"{SYSTEM_PROMPT}\n\n{OFFLINE_NOTICE}"
-    response = await llm.ainvoke([SystemMessage(content=prompt), *state["messages"]])
+    # MCPAdapter returns LangChain-compatible tools, but the model still must
+    # be explicitly bound to them before it can legally emit tool calls.
+    model = llm.bind_tools(tools) if tools_available and tools else llm
+    response = await model.ainvoke([SystemMessage(content=prompt), *state["messages"]])
     return {"messages": [response]}
 
 
@@ -120,7 +131,11 @@ def _make_graph(tools: list[Any], checkpointer: AsyncSqliteSaver, tools_availabl
     tool_map = {tool.name: tool for tool in tools}
 
     async def model(state: MessagesState) -> dict[str, list[Any]]:
-        return await _model_node(state, tools_available=tools_available)
+        return await _model_node(
+            state,
+            tools=tools,
+            tools_available=tools_available,
+        )
 
     async def remote_tools(state: MessagesState) -> dict[str, list[ToolMessage]]:
         """Invoke each tool and turn outages into model-readable ToolMessages."""
@@ -244,6 +259,18 @@ async def list_threads(memory: AsyncSqliteSaver) -> list[str]:
     return sorted(thread_ids)
 
 
+async def saved_threads() -> list[str]:
+    """Open the SQLite file briefly and return all saved chat IDs."""
+    async with AsyncSqliteSaver.from_conn_string(MEMORY_DB) as memory:
+        return await list_threads(memory)
+
+
+async def forget_thread(thread_id: str) -> None:
+    """Delete one named chat from persistent memory."""
+    async with AsyncSqliteSaver.from_conn_string(MEMORY_DB) as memory:
+        await memory.adelete_thread(thread_id)
+
+
 async def show_history(graph: Any, config: dict[str, Any]) -> str:
     """Format the current thread's human/assistant conversation."""
     snapshot = await graph.aget_state(config)
@@ -260,6 +287,27 @@ async def show_history(graph: Any, config: dict[str, Any]) -> str:
         if text:
             lines.append(f"{label}: {text}")
     return "\n\n".join(lines) or "No saved messages for this chat yet."
+
+
+async def load_thread_messages(thread_id: str) -> list[dict[str, str]]:
+    """Load display-ready user/assistant messages for the Streamlit sidebar."""
+    config = _config(thread_id)
+    async with AsyncSqliteSaver.from_conn_string(MEMORY_DB) as memory:
+        async with graph_runtime(memory) as graph:
+            snapshot = await graph.aget_state(config)
+            messages = (snapshot.values or {}).get("messages", [])
+            result: list[dict[str, str]] = []
+            for message in messages:
+                if isinstance(message, HumanMessage):
+                    role = "user"
+                elif isinstance(message, AIMessage):
+                    role = "assistant"
+                else:
+                    continue
+                text = _content_text(message.content).strip()
+                if text:
+                    result.append({"role": role, "content": text})
+            return result
 
 
 async def stream_turn(

@@ -1,10 +1,16 @@
 """Streamlit UI for the persistent, streaming LangGraph client."""
 
 import asyncio
+import re
 
 import streamlit as st
 
-from ai_assignment01.agent import stream_turn
+from ai_assignment01.agent import (
+    forget_thread,
+    load_thread_messages,
+    saved_threads,
+    stream_turn,
+)
 
 
 st.set_page_config(
@@ -22,21 +28,67 @@ st.markdown(
     [data-testid="stChatMessage"] { background: white; border: 1px solid #e5e7eb;
         border-radius: 16px; padding: 1rem; margin-bottom: .75rem; }
     [data-testid="stSidebar"] { background: #202123; }
-    [data-testid="stSidebar"] * { color: white; }
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 { color: #ffffff !important; }
+    [data-testid="stSidebar"] input {
+        background: #ffffff !important;
+        color: #111827 !important;
+        caret-color: #111827 !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="select"] > div {
+        background: #343541 !important;
+        color: #ffffff !important;
+        border-color: #565869 !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="select"] * { color: #ffffff !important; }
+    .current-chat {
+        background: #343541; border: 1px solid #565869; border-radius: 10px;
+        color: #ffffff; padding: .65rem .8rem; margin: .5rem 0 1rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-if "ui_messages" not in st.session_state:
-    st.session_state.ui_messages = []
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = "student"
+def _clean_chat_name(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9 _.-]", "", value).strip()
+    return value[:40]
 
 
-def reset_chat() -> None:
-    st.session_state.ui_messages = []
+if "chat_ids" not in st.session_state:
+    try:
+        persisted = asyncio.run(saved_threads())
+    except Exception:
+        persisted = []
+    st.session_state.chat_ids = persisted or ["student"]
+if "active_chat" not in st.session_state:
+    st.session_state.active_chat = st.session_state.chat_ids[0]
+if "messages_by_chat" not in st.session_state:
+    st.session_state.messages_by_chat = {}
+if "loaded_chats" not in st.session_state:
+    st.session_state.loaded_chats = set()
+
+
+def set_active_chat(chat_id: str) -> None:
+    if chat_id == st.session_state.active_chat:
+        return
+    st.session_state.active_chat = chat_id
+    st.rerun()
+
+
+active_chat = st.session_state.active_chat
+if active_chat not in st.session_state.loaded_chats:
+    try:
+        st.session_state.messages_by_chat[active_chat] = asyncio.run(
+            load_thread_messages(active_chat)
+        )
+    except Exception:
+        st.session_state.messages_by_chat[active_chat] = []
+    st.session_state.loaded_chats.add(active_chat)
 
 
 def ask_agent(prompt: str, placeholder) -> str:
@@ -49,9 +101,7 @@ def ask_agent(prompt: str, placeholder) -> str:
         elif event["type"] == "status" and not streamed:
             placeholder.caption(event["text"])
 
-    response = asyncio.run(
-        stream_turn(prompt, st.session_state.thread_id, on_event)
-    )
+    response = asyncio.run(stream_turn(prompt, st.session_state.active_chat, on_event))
     return response or "I couldn't produce a response. Please try again."
 
 
@@ -59,10 +109,46 @@ with st.sidebar:
     st.markdown("## 🎓 GPA Assistant")
     st.caption("PUCIT BS Computer Science")
     st.divider()
-    st.text_input("Chat name", key="thread_id")
-    if st.button("＋ New chat", use_container_width=True):
-        reset_chat()
+
+    selected_chat = st.selectbox(
+        "Your chats",
+        options=st.session_state.chat_ids,
+        index=st.session_state.chat_ids.index(active_chat),
+        key="chat_selector",
+    )
+    if selected_chat != st.session_state.active_chat:
+        set_active_chat(selected_chat)
+
+    st.markdown(
+        f"<div class='current-chat'>Current chat<br><strong>{active_chat}</strong></div>",
+        unsafe_allow_html=True,
+    )
+
+    new_name = st.text_input(
+        "New chat name",
+        placeholder="e.g. Ali semester 5",
+        key="new_chat_name",
+    )
+    if st.button("＋ Create new chat", use_container_width=True):
+        chat_id = _clean_chat_name(new_name) or f"chat-{len(st.session_state.chat_ids) + 1}"
+        if chat_id not in st.session_state.chat_ids:
+            st.session_state.chat_ids.append(chat_id)
+            st.session_state.messages_by_chat[chat_id] = []
+            st.session_state.loaded_chats.add(chat_id)
+        st.session_state.active_chat = chat_id
         st.rerun()
+
+    if st.button("Delete current chat", use_container_width=True):
+        asyncio.run(forget_thread(active_chat))
+        st.session_state.chat_ids.remove(active_chat)
+        st.session_state.messages_by_chat.pop(active_chat, None)
+        st.session_state.loaded_chats.discard(active_chat)
+        if not st.session_state.chat_ids:
+            st.session_state.chat_ids.append("student")
+        st.session_state.active_chat = st.session_state.chat_ids[0]
+        st.rerun()
+
+    st.divider()
     st.markdown("### I can help with")
     st.markdown("GPA · CGPA projection · target planning · courses · credit hours · reports")
     st.divider()
@@ -75,12 +161,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-for message in st.session_state.ui_messages:
+messages = st.session_state.messages_by_chat.setdefault(active_chat, [])
+for message in messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 selected_prompt = None
-if not st.session_state.ui_messages:
+if not messages:
     with st.container(border=True):
         st.markdown("### How can I help with your GPA?")
         st.write("Calculate a GPA, project your CGPA, inspect course credit hours, or plan a target.")
@@ -103,7 +190,7 @@ typed_prompt = st.chat_input("Ask about GPA, CGPA, courses, marks or your target
 prompt = typed_prompt or selected_prompt
 
 if prompt:
-    st.session_state.ui_messages.append({"role": "user", "content": prompt})
+    messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
     with st.chat_message("assistant"):
@@ -114,6 +201,7 @@ if prompt:
             except Exception as error:
                 response = f"Something went wrong while processing the request: {error}"
         placeholder.markdown(response)
-    st.session_state.ui_messages.append({"role": "assistant", "content": response})
+    messages.append({"role": "assistant", "content": response})
+    st.session_state.messages_by_chat[active_chat] = messages
     if selected_prompt:
         st.rerun()
