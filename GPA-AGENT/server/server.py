@@ -32,6 +32,9 @@ except ImportError:  # ``python server/server.py`` puts server/ on sys.path.
 
 load_dotenv()
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 mcp = FastMCP("pucit-gpa")
 
 for function in (
@@ -47,6 +50,12 @@ for function in (
 ):
     mcp.tool(function)
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request):
+    return JSONResponse({
+        "status": "healthy",
+        "service": "pucit-gpa"
+    })
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", os.getenv("MCP_PORT", "8000")))
